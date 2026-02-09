@@ -1,0 +1,386 @@
+<!-- index.html  |  Visualizador QR + Upload CSV (curadoria / npAnalise)  -->
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Morholt • QR Curadoria</title>
+
+  <!-- ✅ OFFLINE/LOCAL: use os arquivos que já estão no seu repo -->
+  <!-- (ajuste os caminhos se eles estiverem em subpastas) -->
+  <script src="./papaparse.min.js"></script>
+  <script src="./jsQR.js"></script>
+
+  <style>
+    :root{
+      --ok:#0a7a2e; --bad:#b00020; --warn:#b26a00;
+      --bg:#0b0f14; --card:#121926; --text:#e8eef7; --muted:#a9b4c4;
+      --btn:#1b2638; --border:rgba(255,255,255,.12);
+    }
+    body{margin:0;padding:16px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);}
+    .wrap{max-width:560px;margin:0 auto;}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.35);}
+    h1{font-size:18px;margin:0 0 10px;}
+    p{margin:8px 0;color:var(--muted);line-height:1.35;font-size:14px;}
+    .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;}
+    button, input[type="file"]{
+      appearance:none;border:1px solid var(--border);background:var(--btn);color:var(--text);
+      padding:10px 12px;border-radius:12px;font-weight:700;cursor:pointer;
+    }
+    input[type="file"]{width:100%;font-weight:600;}
+    button:active{transform:translateY(1px);}
+    button:disabled{opacity:.55;cursor:not-allowed;}
+    .status{margin-top:12px;padding:12px;border-radius:14px;border:1px solid var(--border);background:rgba(255,255,255,.04);}
+    .pill{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:900;letter-spacing:.2px;font-size:12px;border:1px solid transparent;}
+    .pill.ok{background:rgba(10,122,46,.22);color:#9af7b4;border-color:rgba(10,122,46,.35);}
+    .pill.bad{background:rgba(176,0,32,.22);color:#ffb3c2;border-color:rgba(176,0,32,.35);}
+    .pill.warn{background:rgba(178,106,0,.22);color:#ffd59a;border-color:rgba(178,106,0,.35);}
+    .kv{margin-top:8px;}
+    .kv b{color:var(--text);}
+    .small{font-size:12px;color:var(--muted);}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
+    .hr{height:1px;background:var(--border);margin:12px 0;}
+    .videoWrap{
+      margin-top:10px;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:#000;
+      min-height:240px;
+    }
+    video{width:100%;height:auto;display:block;background:#000;}
+    canvas{display:none;}
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Leitor de QR • Curadoria (Upload CSV)</h1>
+      <p>
+        Fluxo: <b>1)</b> carregar CSV <b>2)</b> testar câmera <b>3)</b> iniciar leitura do QR.<br/>
+        Regra: <span class="mono">branchTipoAtividade="curadoria"</span> → comparar QR com <span class="mono">npAnalise</span>.
+      </p>
+
+      <input id="csvFile" type="file" accept=".csv,text/csv" />
+      <div class="row">
+        <button id="btnParse">Carregar CSV</button>
+        <button id="btnCamTest">Testar câmera</button>
+      </div>
+
+      <div class="status" id="csvStatus">
+        <span class="pill warn" id="csvPill">CSV não carregado</span>
+        <div class="kv"><b>NPs analisados:</b> <span class="mono" id="csvCount">0</span></div>
+        <div class="small" id="csvHint">Carregue o CSV para ativar a verificação.</div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="videoWrap">
+        <video id="video" playsinline></video>
+      </div>
+
+      <div class="row">
+        <button id="btnStart" disabled>Iniciar câmera</button>
+        <button id="btnStop" disabled>Parar</button>
+      </div>
+
+      <div class="status">
+        <span class="pill warn" id="pill">Aguardando…</span>
+        <div class="kv"><b>QR lido:</b> <span class="mono" id="qrText">—</span></div>
+        <div class="kv"><b>Resultado:</b> <span id="resultText">Carregue o CSV para começar.</span></div>
+        <div class="small" id="hint">
+          Dica: se o QR vier com URL/texto extra, o sistema tenta extrair padrões como <span class="mono">AB001_A_0001</span>.
+        </div>
+        <div class="small" id="secureHint" style="margin-top:8px;"></div>
+      </div>
+
+      <canvas id="canvas"></canvas>
+    </div>
+  </div>
+
+<script>
+  // =========================
+  // ESTADO
+  // =========================
+  let analyzedSet = new Set();
+  let stream = null;
+  let scanning = false;
+  let lastCode = "";
+  let rafId = null;
+
+  // =========================
+  // ELEMENTOS
+  // =========================
+  const csvFile = document.getElementById("csvFile");
+  const btnParse = document.getElementById("btnParse");
+  const btnCamTest = document.getElementById("btnCamTest");
+  const btnStart = document.getElementById("btnStart");
+  const btnStop = document.getElementById("btnStop");
+
+  const csvPill = document.getElementById("csvPill");
+  const csvCount = document.getElementById("csvCount");
+  const csvHint = document.getElementById("csvHint");
+
+  const pill = document.getElementById("pill");
+  const qrText = document.getElementById("qrText");
+  const resultText = document.getElementById("resultText");
+  const secureHint = document.getElementById("secureHint");
+
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  // =========================
+  // UI HELPERS
+  // =========================
+  function setCsvOk(count, msg){
+    csvPill.className = "pill ok";
+    csvPill.textContent = "CSV carregado ✓";
+    csvCount.textContent = String(count);
+    csvHint.textContent = msg || "Pronto para ler QRCode.";
+    btnStart.disabled = false;
+  }
+  function setCsvBad(msg){
+    csvPill.className = "pill bad";
+    csvPill.textContent = "Erro no CSV ✗";
+    csvCount.textContent = "0";
+    csvHint.textContent = msg || "Falha ao ler CSV.";
+    btnStart.disabled = true;
+  }
+  function setCsvWarn(msg){
+    csvPill.className = "pill warn";
+    csvPill.textContent = "CSV não carregado";
+    csvCount.textContent = "0";
+    csvHint.textContent = msg || "Carregue o CSV para ativar a verificação.";
+    btnStart.disabled = true;
+  }
+
+  function setOk(qr, msg){
+    pill.className = "pill ok";
+    pill.textContent = "ANALISADO ✓";
+    qrText.textContent = qr || "—";
+    resultText.textContent = msg || "Encontrado em npAnalise (curadoria).";
+  }
+  function setBad(qr, msg){
+    pill.className = "pill bad";
+    pill.textContent = "NÃO ANALISADO ✗";
+    qrText.textContent = qr || "—";
+    resultText.textContent = msg || "Não encontrado em npAnalise (curadoria).";
+  }
+  function setWarn(qr, msg){
+    pill.className = "pill warn";
+    pill.textContent = "ATENÇÃO";
+    qrText.textContent = qr || "—";
+    resultText.textContent = msg || "—";
+  }
+
+  // =========================
+  // NORMALIZAÇÃO DO CÓDIGO
+  // =========================
+  function normalizeCode(raw){
+    if (!raw) return "";
+    let s = String(raw).trim();
+    s = s.replace(/%5F/g, "_");
+
+    // tenta extrair padrão típico: LETRAS+NUM _ LETRA _ NUM
+    const m1 = s.match(/([A-Z]{2,6}\d{0,4}_[A-Z]_\d{3,6})/i);
+    if (m1) return m1[1].toUpperCase();
+
+    // fallback
+    s = s.replace(/\s+/g, "");
+    return s.toUpperCase();
+  }
+
+  // =========================
+  // CARREGAR CSV (PapaParse)
+  // =========================
+  async function loadCsv(){
+    const f = csvFile.files && csvFile.files[0];
+    if (!f){
+      setCsvWarn("Selecione um arquivo CSV primeiro.");
+      return;
+    }
+    setWarn("—", "Lendo CSV…");
+
+    Papa.parse(f, {
+      header: true,
+      delimiter: ";",
+      skipEmptyLines: true,
+      dynamicTyping: false,
+      complete: (res) => {
+        try{
+          const rows = res.data || [];
+          if (!rows.length) {
+            setCsvBad("CSV parece vazio.");
+            return;
+          }
+
+          // achar chaves mesmo com variações de maiúsculas/minúsculas
+          const keys = Object.keys(rows[0] || {});
+          const findKey = (wanted) => keys.find(k => String(k).trim().toLowerCase() === wanted);
+
+          const kTipo = findKey("branchtipoatividade");
+          const kNpA  = findKey("npanalise");
+
+          if (!kTipo || !kNpA){
+            setCsvBad("Não achei as colunas 'branchTipoAtividade' e/ou 'npAnalise'.");
+            return;
+          }
+
+          const set = new Set();
+          for (const r of rows){
+            const tipo = String(r[kTipo] ?? "").trim().toLowerCase();
+            if (tipo !== "curadoria") continue;
+
+            let np = String(r[kNpA] ?? "").trim();
+            if (!np || np.toLowerCase() === "nan") continue;
+
+            np = normalizeCode(np);
+            if (np) set.add(np);
+          }
+
+          analyzedSet = set;
+
+          if (analyzedSet.size === 0){
+            setCsvBad("Carregou, mas não encontrei npAnalise com branchTipoAtividade='curadoria'.");
+            return;
+          }
+
+          setCsvOk(analyzedSet.size, "CSV carregado. Agora inicie a câmera.");
+          setWarn("—", "CSV OK. Agora toque em “Testar câmera” e depois “Iniciar câmera”.");
+        } catch(e){
+          setCsvBad("Erro ao processar o CSV.");
+        }
+      },
+      error: () => setCsvBad("Erro ao ler o CSV (parse).")
+    });
+  }
+
+  // =========================
+  // TESTE DE CÂMERA (permite ver o motivo do bloqueio)
+  // =========================
+  function isSecureContextOk(){
+    // getUserMedia geralmente exige HTTPS (ou localhost)
+    const ok = window.isSecureContext || location.hostname === "localhost";
+    return ok;
+  }
+
+  async function testCamera(){
+    if (!isSecureContextOk()){
+      setWarn("—", "Este site precisa estar em HTTPS (GitHub Pages/Netlify/Vercel) para liberar câmera.");
+      secureHint.textContent = "⚠️ Abra via https://... (não use file:// ou Raw do GitHub).";
+      return;
+    }
+    secureHint.textContent = "";
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      setWarn("—", "Seu navegador não suporta acesso à câmera (getUserMedia).");
+      return;
+    }
+    try{
+      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      s.getTracks().forEach(t => t.stop());
+      setWarn("—", "Permissão de câmera OK ✓");
+    } catch(e){
+      const name = e?.name || "Erro";
+      if (name === "NotAllowedError") setWarn("—", "Permissão negada. Ative Câmera nas permissões do site.");
+      else if (name === "NotFoundError") setWarn("—", "Nenhuma câmera encontrada.");
+      else if (name === "NotReadableError") setWarn("—", "Câmera ocupada por outro app.");
+      else setWarn("—", "Não consegui acessar a câmera. Verifique permissões.");
+    }
+  }
+
+  // =========================
+  // SCAN via jsQR (frame-by-frame)
+  // =========================
+  async function startScanner(){
+    if (analyzedSet.size === 0){
+      setWarn("—", "Carregue o CSV antes de iniciar a câmera.");
+      return;
+    }
+    if (!isSecureContextOk()){
+      setWarn("—", "Precisa abrir em HTTPS para usar câmera.");
+      secureHint.textContent = "⚠️ Use GitHub Pages/Netlify/Vercel. Não funciona em file://.";
+      return;
+    }
+    secureHint.textContent = "";
+
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      video.srcObject = stream;
+      await video.play();
+
+      scanning = true;
+      btnStop.disabled = false;
+      btnStart.disabled = true;
+
+      setWarn("—", "Câmera ligada. Aponte para o QR…");
+      scanLoop();
+    } catch(e){
+      setWarn("—", "Falha ao iniciar câmera. Verifique permissões do site.");
+    }
+  }
+
+  function stopScanner(){
+    scanning = false;
+    btnStop.disabled = true;
+    btnStart.disabled = (analyzedSet.size === 0);
+
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+
+    if (stream){
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    video.srcObject = null;
+    setWarn("—", "Scanner parado.");
+  }
+
+  function scanLoop(){
+    if (!scanning) return;
+
+    // garante tamanho
+    const w = video.videoWidth || 0;
+    const h = video.videoHeight || 0;
+
+    if (w > 0 && h > 0){
+      canvas.width = w;
+      canvas.height = h;
+      ctx.drawImage(video, 0, 0, w, h);
+
+      const imageData = ctx.getImageData(0, 0, w, h);
+      const code = jsQR(imageData.data, w, h, { inversionAttempts: "attemptBoth" });
+
+      if (code && code.data){
+        const norm = normalizeCode(code.data);
+        if (norm && norm !== lastCode){
+          lastCode = norm;
+          if (analyzedSet.has(norm)) setOk(norm, "Este NP aparece em npAnalise (curadoria).");
+          else setBad(norm, "Este NP NÃO aparece em npAnalise (curadoria).");
+
+          if (navigator.vibrate) navigator.vibrate(60);
+        }
+      }
+    }
+
+    rafId = requestAnimationFrame(scanLoop);
+  }
+
+  // =========================
+  // EVENTOS
+  // =========================
+  btnParse.addEventListener("click", loadCsv);
+  btnCamTest.addEventListener("click", testCamera);
+  btnStart.addEventListener("click", startScanner);
+  btnStop.addEventListener("click", stopScanner);
+
+  // Estado inicial
+  setCsvWarn();
+  btnStop.disabled = true;
+  btnStart.disabled = true;
+
+  // dica de contexto seguro
+  if (!isSecureContextOk()){
+    secureHint.textContent = "⚠️ Para a câmera funcionar: abra este site em HTTPS (GitHub Pages / Netlify / Vercel).";
+  }
+</script>
+</body>
+</html>
